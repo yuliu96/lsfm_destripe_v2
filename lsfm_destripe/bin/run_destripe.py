@@ -38,8 +38,8 @@ class Args(argparse.Namespace):
 
     def __parse(self):
         p = argparse.ArgumentParser(
-            prog="run_exmaple",
-            description="A simple example of a bin script",
+            prog="run_destripe",
+            description="run destripe for LSFM images",
         )
 
         p.add_argument(
