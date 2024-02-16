@@ -460,7 +460,7 @@ class GuidedFilterHR_fast(nn.Module):
 
     def forward(self, xx, yy, hX):
         with torch.no_grad():
-            if self.crop == None:
+            if self.crop is None:
                 self.crop = torchvision.transforms.CenterCrop(xx.size()[-2:])
             AList, bList = [], []
             for i, Angle in enumerate(self.angleList):
@@ -546,7 +546,7 @@ class GuidedFilterHR(nn.Module):
         return (img * weight).sum(-1)
 
     def sgolay2dkernel(self, window_size, order):
-        n_terms = (order + 1) * (order + 2) / 2.0
+        # n_terms = (order + 1) * (order + 2) / 2.0
         half_size = window_size // 2
         exps = []
         for row in range(order[0] + 1):
@@ -692,7 +692,6 @@ class GuidedFilterHR(nn.Module):
                     )
                 bdetail = torch.cat(bdetail, -1)
                 Abase, bbase = torch.cat(Abase, -1), torch.cat(bbase, -1)
-                # bdetail = torch.conv2d(bdetail, self.K, padding = (self.K.shape[-2]//2, self.K.shape[-1]//2))
                 result = Abase * XXbase + bbase + XXdetail + bdetail
                 X = self.crop(
                     torchvision.transforms.functional.rotate(

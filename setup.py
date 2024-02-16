@@ -42,6 +42,7 @@ requirements = [
     "torch",
     "torchvision",
     "aicsimageio==4.10.0",
+    "tqdm",
 ]
 
 extra_requirements = {
