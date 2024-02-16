@@ -1,3 +1,4 @@
+from typing import List
 import numpy as np
 from scipy.ndimage import rotate
 import math
@@ -25,9 +26,7 @@ def NeighborSampling(m, n, k_neighbor=16):
     ring_radius, index = 0, 0
     while 1:
         if ring_radius != 0:
-            Norms1 = grid_y / (ring_radius**2) + grid_x / (
-                (ring_radius / n * m) ** 2
-            )
+            Norms1 = grid_y / (ring_radius**2) + grid_x / ((ring_radius / n * m) ** 2)
         ring_radius = ring_radius + 5
         Norms2 = grid_y / (ring_radius**2) + grid_x / ((ring_radius / n * m) ** 2)
         if ring_radius == 5:
@@ -68,3 +67,69 @@ def WedgeMask(md, nd, Angle, deg):
     b = tmp[md - md // 2 : md + md // 2 + 1, nd - nd // 2 : nd + nd // 2 + 1]
     return ((a <= math.pi / 180 * (90 - deg)) * (b > 18)) != 0
 
+
+def prepare_aux(
+    md: int,
+    nd: int,
+    is_vertical: bool = False,
+    angleOffset: List[float] = None,
+    deg: float = 0,
+    Nneighbors: int = 16,
+):
+    """
+    the function preparing auxillary variables for training based on image shape
+
+    Parameters:
+    ------------
+    md: int
+        sampling nbr size along Y
+    nd: int
+        sampling nbr size along X
+    is_verticel: book
+        if the stripes are vertical
+    angleOffset: TODO
+        TODO
+    deg: float
+        TODO
+    Nneighbors: int
+        TODO
+
+    Returns:
+    -------------
+    NI: ndarray
+        TODO
+    hier_mask: ndarray
+        TODO
+    hier_ind: ndarray
+        TODO
+    """
+
+    angleMask = np.stack(
+        [
+            WedgeMask(
+                md if is_vertical else nd,
+                nd if is_vertical else md,
+                Angle=angle,
+                deg=deg,
+            )
+            for angle in angleOffset
+        ],
+        0,
+    )
+    angleMask = angleMask.reshape(angleMask.shape[0], -1)[:, : md * nd // 2]
+    hier_mask = np.where(angleMask == 1)[1]
+    hier_ind = np.argsort(
+        np.concatenate(
+            [np.where(angleMask.reshape(-1) == index)[0] for index in range(2)]
+        )
+    )
+    if is_vertical:
+        NI = NeighborSampling(md, nd, k_neighbor=Nneighbors)
+    else:
+        NI = NeighborSampling(nd, md, k_neighbor=Nneighbors)
+
+    NI = np.concatenate(
+        [NI[hier_mask == 0, 1 : Nneighbors + 1].T for hier_mask in angleMask], 1
+    )
+
+    return NI, hier_mask, hier_ind

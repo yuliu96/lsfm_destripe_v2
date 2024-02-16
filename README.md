@@ -8,19 +8,42 @@ A PyTorch implementation of LSFM DeStripe method
 
 ---
 
-## Features
-
--   Store values and retain the prior value in memory
--   ... some other functionality
-
 ## Quick Start
 
+### Use as Python API
+(1) Provide a numpy array, i.e., the image to be processed, and necessary parameters (more suitable for small data or for use in napari)
 ```python
-from lsfm_destripe import Example
+from lsfm_destripe import DeStripe
 
-a = Example()
-a.get_value()  # 10
+out = DeStripe.train_full_arr(img_arr, mask_arr, is_vertical, train_param, device, qr, require_global_correction)
 ```
+(2) Provide a filename, run slice by slice (suitable for extremely large file)
+```python
+from lsfm_destripe import DeStripe
+
+exe = DeStripe()
+# run with default parameters
+exe = DeStripe(data_path)
+# adjust some parameters
+exe = DeStripe(data_path, isVertical, angleOffset,losseps, mask_name)
+out = exe.train()
+```
+
+### Run from command line for batch processing
+(1) run with all default parameters
+```bash
+destripe --data_path /path/to/my/image.tiff --save_path /path/to/save/results
+```
+
+(2) run with different parameters
+```bash
+destripe --data_path /path/to/my/image.tiff \
+         --save_path /path/to/save/results \
+         --deg 12 \
+         --Nneighbors 32 \
+         --n_epochs 500
+```
+
 
 ## Installation
 
@@ -34,28 +57,6 @@ For full package documentation please visit [MMV-Lab.github.io/lsfm_destripe](ht
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for information related to developing the code.
-
-## The Four Commands You Need To Know
-
-1. `pip install -e .[dev]`
-
-    This will install your package in editable mode with all the required development
-    dependencies (i.e. `tox`).
-
-2. `make build`
-
-    This will run `tox` which will run all your tests in both Python 3.7
-    and Python 3.8 as well as linting your code.
-
-3. `make clean`
-
-    This will clean up various Python and build generated files so that you can ensure
-    that you are working in a clean environment.
-
-4. `make docs`
-
-    This will generate and launch a web browser to view the most up-to-date
-    documentation for your Python package.
 
 #### Additional Optional Setup Steps:
 
@@ -84,20 +85,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for information related to developing the
     -   Next time you push to the branch `main` after using `bump2version`, GitHub
         actions will build and deploy your Python package to PyPI.
 
-#### Suggested Git Branch Strategy
 
-1. `main` is for the most up-to-date development, very rarely should you directly
-   commit to this branch. GitHub Actions will run on every push and on a CRON to this
-   branch but still recommended to commit to your development branches and make pull
-   requests to main. If you push a tagged commit with bumpversion, this will also release to PyPI.
-2. Your day-to-day work should exist on branches separate from `main`. Even if it is
-   just yourself working on the repository, make a PR from your working branch to `main`
-   so that you can ensure your commits don't break the development head. GitHub Actions
-   will run on every push to any branch or any pull request from any branch to any other
-   branch.
-3. It is recommended to use "Squash and Merge" commits when committing PR's. It makes
-   each set of changes to `main` atomic and as a side effect naturally encourages small
-   well defined PR's.
 
 
 **MIT license**

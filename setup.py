@@ -42,6 +42,7 @@ requirements = [
     "torch",
     "torchvision",
     "aicsimageio==4.10.0",
+    "tqdm",
 ]
 
 extra_requirements = {
@@ -62,9 +63,9 @@ setup(
         "Intended Audience :: Developers",
         "License :: OSI Approved :: MIT License",
         "Natural Language :: English",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
     ],
     description="A PyTorch implementation of LSFM DeStripe method",
     entry_points={
@@ -80,7 +81,7 @@ setup(
     keywords="lsfm_destripe",
     name="lsfm_destripe",
     packages=find_packages(exclude=["tests", "*.tests", "*.tests.*"]),
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     setup_requires=setup_requirements,
     test_suite="lsfm_destripe/tests",
     tests_require=test_requirements,
