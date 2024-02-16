@@ -13,7 +13,7 @@ import torch.fft as fft
 from torch.nn import functional as F
 from tqdm import tqdm
 
-from network import (
+from lsfm_destripe.network import (
     DeStripeModel,
     Loss,
     GuidedFilterHR_fast,
@@ -21,7 +21,7 @@ from network import (
     GuidedFilterLoss,
 )
 
-from utils import prepare_aux
+from lsfm_destripe.utils import prepare_aux
 
 ###############################################################################
 
