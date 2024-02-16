@@ -11,8 +11,6 @@ Docs: https://docs.pytest.org/en/latest/
       https://docs.pytest.org/en/latest/goodpractices.html#conventions-for-python-test-discovery
 """
 
-import pytest
-
 
 # If you only have a single condition you need to test, a single test is _okay_
 # but parametrized tests are encouraged
