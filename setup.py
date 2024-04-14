@@ -41,8 +41,9 @@ requirements = [
     "scikit-image",
     "torch",
     "torchvision",
-    "aicsimageio==4.10.0",
+    "aicsimageio",
     "tqdm",
+    "matplotlib",
 ]
 
 extra_requirements = {
@@ -52,7 +53,7 @@ extra_requirements = {
     "all": [
         *requirements,
         *dev_requirements,
-    ]
+    ],
 }
 
 setup(
@@ -69,9 +70,7 @@ setup(
     ],
     description="A PyTorch implementation of LSFM DeStripe method",
     entry_points={
-        "console_scripts": [
-            "destripe=lsfm_destripe.bin.run_destripe:main"
-        ],
+        "console_scripts": ["destripe=lsfm_destripe.bin.run_destripe:main"],
     },
     install_requires=requirements,
     license="MIT license",
@@ -86,7 +85,7 @@ setup(
     test_suite="lsfm_destripe/tests",
     tests_require=test_requirements,
     extras_require=extra_requirements,
-    url="https://github.com/MMV-Lab/lsfm_destripe",
+    url="https://github.com/peng-lab/lsfm_destripe",
     # Do not edit this string manually, always use bumpversion
     # Details in CONTRIBUTING.rst
     version="0.0.1",

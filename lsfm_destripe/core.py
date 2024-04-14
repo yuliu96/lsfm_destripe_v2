@@ -1,475 +1,447 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-import logging
-from typing import Optional, Dict, Union, List
-from types import SimpleNamespace
-from pathlib import Path
-
+import matplotlib.pyplot as plt
 import numpy as np
-import scipy
-from aicsimageio import AICSImage
 import torch
 import torch.fft as fft
 from torch.nn import functional as F
-from tqdm import tqdm
+import tqdm
+from typing import Union, List, Dict
+import dask.array as da
+from aicsimageio import AICSImage
+import dask
+import warnings
 
-from lsfm_destripe.network import (
-    DeStripeModel,
-    Loss,
-    GuidedFilterHR_fast,
-    GuidedFilterHR,
-    GuidedFilterLoss,
+from lsfm_destripe.network import DeStripeModel, GuidedFilterLoss, Loss
+from lsfm_destripe.utils import (
+    prepare_aux,
+    global_correction,
+    fusion_perslice,
+    destripe_train_params,
 )
+from lsfm_destripe.guided_filter_variant import (
+    GuidedFilterHR,
+    GuidedFilterHR_fast,
+    GuidedFilter,
+)
+from lsfm_destripe.utils_pytorch import cADAM
 
-from lsfm_destripe.utils import prepare_aux
 
-###############################################################################
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
 
-log = logging.getLogger(__name__)
 
-
-###############################################################################
 class DeStripe:
     def __init__(
         self,
-        data_path: Union[str, Path],
-        isVertical: bool = True,
-        angleOffset: List = [0],
-        losseps: float = 10,
+        loss_eps: float = 10,
         qr: float = 0.5,
-        resampleRatio: int = 2,
-        KGF: int = 29,
-        KGFh: int = 29,
-        HKs: float = 0.5,
+        resample_ratio: int = 3,
+        GF_kernel_size_train: int = 29,
+        GF_kernel_size_inference: int = 29,
+        hessian_kernel_sigma: float = 1,
         sampling_in_MSEloss: int = 2,
         isotropic_hessian: bool = True,
         lambda_tv: float = 1,
         lambda_hessian: float = 1,
         inc: int = 16,
         n_epochs: int = 300,
-        deg: float = 29,
-        Nneighbors: int = 16,
+        wedge_degree: float = 29,
+        n_neighbors: int = 16,
         fast_GF: bool = False,
         require_global_correction: bool = True,
-        mask_name: Union[str, Path] = None,
+        fusion_GF_kernel_size: int = 49,
+        fusion_Gaussian_kernel_size: int = 49,
+        device: str = None,
     ):
-        """
-        Main class for De-striping
-
-        Parameters:
-        -----------------------
-        data_path: str or Path
-            file path for volume input
-        isVertical: boolean
-            direction of the stripes. True by default
-        angleOffset: List
-            a list of angles in degree, data range for each angle is
-            [-90, 90]. For example [-10, 0, 10] for ultramicroscope.
-            [0] by default
-        losseps: float
-            eps in loss. data range [0.1, inf). 10 by default
-        qr: float
-            TODO (add more details)
-            a threhold. data range [0.5, inf). 0.5 by default
-        resampleRatio: int
-            downsample ratio, data range [1, inf), 2 by default
-        KGF: int
-            kernel size for guided filter during training. must be odd. 29 by default
-        KGFh: int
-            TODO (add more details)
-            kernel size for guided filter during inference. must be odd. 29 by default
-        HKs: float
-            sigma to generate hessian kernel. data range [0.5, 1.5]. 0.5 by default
-        sampling_in_MSEloss: int
-            TODO (add more details)
-            downsampling when calculating MSE. data range [1, inf). 2 by default
-        isotropic_hessian: boolean
-            True by default
-        lambda_tv: float
-            trade-off parameter of total variation in loss. data range (0, inf).
-            1 by default
-        lambda_hessian: float
-            trade-off parameter of hessian in loss. data range (0, inf). 1 by default
-        inc: int
-            latent neuron numbers in NN. power of 2. 16 by default
-        n_epochs: int
-            total epochs for training. data range [1, inf). 300 by default
-        deg: float
-            angle in degree to generate wedge-like mask. data range (0, 90).
-            29 by default
-        Nneighbors: int
-            data range [1, 32], 16 by default
-        fast_GF: boolean
-            methods used for composing high-res result, False by default
-        require_global_correction: boolean
-            Whether to run additional correction for whole z-stack after processing
-            individual slices. True by default
-        mask_name: str or Path
-            path to mask file (if applicable). None by default
-        """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._isVertical = isVertical
-        self.filename = data_path
-        self.mask_name = mask_name
-
-        # TODO: Is qr always a single number or could be a list of numbers?
-        qr = [qr]
-        self.qr = qr
-
-        self.train_param = {
+        self.train_params = {
             "fast_GF": fast_GF,
-            "KGF": KGF,
-            "KGFh": KGFh,
-            "losseps": losseps,
-            "angleOffset": angleOffset,
-            "Nneighbors": Nneighbors,
+            "GF_kernel_size_train": GF_kernel_size_train,
+            "GF_kernel_size_inference": GF_kernel_size_inference,
+            "loss_eps": loss_eps,
+            "n_neighbors": n_neighbors,
             "inc": inc,
-            "HKs": HKs,
+            "hessian_kernel_sigma": hessian_kernel_sigma,
             "lambda_tv": lambda_tv,
             "lambda_hessian": lambda_hessian,
-            "sampling": sampling_in_MSEloss,
-            "resampleRatio": resampleRatio,
-            "f": isotropic_hessian,
+            "sampling_in_MSEloss": sampling_in_MSEloss,
+            "resample_ratio": resample_ratio,
+            "isotropic_hessian": isotropic_hessian,
             "n_epochs": n_epochs,
-            "deg": deg,
-            "hier_mask": None,
-            "hier_ind": None,
-            "NI": None,
+            "wedge_degree": wedge_degree,
+            "qr": qr,
+            "fusion_GF_kernel_size": fusion_GF_kernel_size,
+            "fusion_Gaussian_kernel_size": fusion_Gaussian_kernel_size,
+            "require_global_correction": require_global_correction,
         }
-
-        self.resampleRatio = resampleRatio
-        self.require_global_correction = require_global_correction
-
-        # TODO: why need to convert img==0 to 1??
-        # def tiffread(self, path, frame_index, _is_image=True):
-        #     img = Image.open(path)
-        #     if frame_index is not None:
-        #         img.seek(frame_index)
-        #     img = np.array(img)
-        #     if _is_image:
-        #         img[img == 0] = 1
-        #     return img
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
 
     @staticmethod
-    def train_one_slice(
-        arr_O: np.ndarray,
-        arr_map: Optional[np.ndarray] = None,
-        is_vertical: bool = False,
-        qr: Union[float, List[float]] = None,
-        shape_param: Dict = None,
-        train_param: Dict = None,
+    def train_on_one_slice(
+        GuidedFilterHRModel,
+        sample_params: Dict,
+        train_params: Dict,
+        X: np.ndarray,
+        mask: np.ndarray = None,
+        boundary: np.ndarray = None,
+        s_: int = 1,
+        z: int = 1,
         device: str = "cpu",
     ):
-        """
-        train the network on a single 2D slice
-
-        Parameters:
-        -------------
-        arr_O: ndarray
-            the input slice
-        arr_map: ndarray
-            optional mask
-        is_vertical: book
-            whether the stripe is vertical
-        qr: float or a list of float
-            threshold TODO (add more info)
-        shape_param: Dict
-            parameters related to shape
-        train_param: Dict
-            parameters related to training
-        """
-        # convert dictionary to Object
-        shape_param = SimpleNamespace(**shape_param)
-        train_param = SimpleNamespace(**train_param)
-
-        # check if vertical
-        if is_vertical:
-            arr_O, arr_map = arr_O.T, arr_map.T
-
-        # convert to tensor
-        X = torch.from_numpy(arr_O[None, None]).float().to(device)
-        map = torch.from_numpy(arr_map[None, None]).float().to(device)
-
-        Xd = F.interpolate(
-            X,
-            size=(
-                shape_param.md if is_vertical else shape_param.nd,
-                shape_param.nd if is_vertical else shape_param.md,
-            ),
-            align_corners=True,
-            mode="bilinear",
+        md = (
+            sample_params["md"] if sample_params["is_vertical"] else sample_params["nd"]
         )
-        map = F.interpolate(
-            map,
-            size=(
-                shape_param.md if is_vertical else shape_param.nd,
-                shape_param.nd if is_vertical else shape_param.md,
-            ),
-            align_corners=True,
-            mode="bilinear",
+        nd = (
+            sample_params["nd"] if sample_params["is_vertical"] else sample_params["md"]
         )
-
-        # TODO: add comment
-        map = map > 128
-        Xf = fft.fftshift(fft.fft2(Xd)).reshape(-1)[: Xd.numel() // 2, None]
-        GF_loss = GuidedFilterLoss(
-            rx=train_param.KGF, ry=train_param.KGF, eps=train_param.losseps
-        )
-        smoothedtarget = GF_loss(Xd, Xd)
-        if train_param.fast_GF:
-            GF_HR = GuidedFilterHR_fast(
-                rx=train_param.KGFh, ry=0, angleList=train_param.angleOffset, eps=1e-9
-            ).to(device)
-        else:
-            GF_HR = GuidedFilterHR(
-                rX=[train_param.KGFh * 2 + 1, train_param.KGFh],
-                rY=[0, 0],
-                m=shape_param.md if is_vertical else shape_param.nd,
-                n=shape_param.md if is_vertical else shape_param.nd,
-                Angle=train_param.angleOffset,
+        if sample_params["view_num"] > 1:
+            assert X.shape[1] == 2, print("input X must have 2 channels.")
+            assert isinstance(boundary, np.ndarray), print(
+                "dual-view fusion boundary is missing."
             )
-        model = DeStripeModel(
-            Angle=train_param.angleOffset,
-            hier_mask=train_param.hier_mask,
-            hier_ind=train_param.hier_ind,
-            NI=train_param.NI,
-            m=shape_param.md if is_vertical else shape_param.nd,
-            n=shape_param.md if is_vertical else shape_param.nd,
-            KS=train_param.KGF,
-            Nneighbors=train_param.Nneighbors,
-            inc=train_param.inc,
-            device=device,
-        ).to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        loss = Loss(
-            train_param.HKs,
-            train_param.lambda_tv,
-            train_param.lambda_hessian,
-            train_param.sampling,
-            train_param.f,
-            shape_param.md if is_vertical else shape_param.nd,
-            shape_param.md if is_vertical else shape_param.nd,
-            train_param.angleOffset,
-            train_param.KGF,
-            train_param.losseps,
-            device,
-        ).to(device)
-        for epoch in tqdm(range(train_param.n_epochs), leave=False):
+            boundary = torch.from_numpy(boundary).to(device)
+            kernel = torch.ones(
+                1,
+                1,
+                train_params["fusion_Gaussian_kernel_size"],
+                train_params["fusion_Gaussian_kernel_size"],
+            ).to(device) / (train_params["fusion_Gaussian_kernel_size"] ** 2)
+            dualtarget_numpy = fusion_perslice(
+                GuidedFilter(r=train_params["fusion_GF_kernel_size"], eps=1),
+                GuidedFilter(r=9, eps=1e-6),
+                10 ** X[:, :1, :, :],
+                10 ** X[:, 1:, :, :],
+                train_params["fusion_Gaussian_kernel_size"],
+                kernel,
+                boundary,
+                device=device,
+            )
+            dualtarget = torch.from_numpy(
+                np.log10(dualtarget_numpy[None, None, :, :])
+            ).to(device)
+        X, mask = torch.from_numpy(X).to(device), torch.from_numpy(mask).to(device)
+        # downsample
+        Xd = []
+        for ind in range(X.shape[1]):
+            Xd.append(
+                F.interpolate(
+                    X[:, ind : ind + 1, :, :],
+                    (md, nd),
+                    align_corners=True,
+                    mode="bilinear",
+                )
+            )
+        Xd = torch.cat(Xd, 1)
+        if sample_params["view_num"] > 1:
+            dualtargetd = F.interpolate(
+                dualtarget, (md, nd), align_corners=True, mode="bilinear"
+            )
+        mask = F.interpolate(
+            mask.float(), (md, nd), align_corners=True, mode="bilinear"
+        )
+        mask = (mask > 0).float()
+        # to Fourier
+        Xf = (
+            fft.fftshift(fft.fft2(Xd))
+            .reshape(1, Xd.shape[1], -1)[0]
+            .transpose(1, 0)[: md * nd // 2, :]
+        )
+        # initialize
+        hier_mask, hier_ind, NI = (
+            torch.from_numpy(train_params["hier_mask"]).to(device),
+            torch.from_numpy(train_params["hier_ind"]).to(device),
+            torch.from_numpy(train_params["NI"]).to(device),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            network = DeStripeModel(
+                Angle=sample_params["angle_offset"],
+                hier_mask=hier_mask,
+                hier_ind=hier_ind,
+                NI=NI,
+                KS=train_params["GF_kernel_size_train"],
+                inc=train_params["inc"],
+                m=md,
+                n=nd,
+                resampleRatio=train_params["resample_ratio"],
+                GFr=train_params["fusion_GF_kernel_size"],
+                viewnum=sample_params["view_num"],
+                device=device,
+            ).to(device)
+        optimizer = cADAM(network.parameters(), lr=0.01)
+        smoothedTarget = GuidedFilterLoss(
+            r=train_params["GF_kernel_size_train"], eps=train_params["loss_eps"]
+        )(Xd, Xd)
+        loss = Loss(train_params, sample_params, device).to(device)
+        for epoch in tqdm.tqdm(
+            range(train_params["n_epochs"]),
+            leave=False if (s_ != z) else True,
+            desc="for {} ({} slices in total): ".format(s_, z),
+        ):
             optimizer.zero_grad()
-            outputGNN, outputLR = model(Xd, Xf)
-            epoch_loss = loss(outputGNN, outputLR, smoothedtarget, Xd, map)  # Xd, X
+            Y_raw, Y_GNN, Y_LR = network(
+                Xd, Xf, Xd if sample_params["view_num"] == 1 else dualtargetd, boundary
+            )
+            epoch_loss = loss(
+                Y_raw,
+                Y_GNN,
+                Y_LR,
+                smoothedTarget,
+                Xd if sample_params["view_num"] == 1 else dualtargetd,
+                mask,
+            )  # Xd, X
             epoch_loss.backward()
             optimizer.step()
         with torch.no_grad():
             m, n = X.shape[-2:]
-            outputGNN = F.interpolate(
-                outputGNN, size=(m, n), mode="bilinear", align_corners=True
-            )
-            if not train_param.fast_GF:
-                for index, qr in enumerate(train_param.qr):
-                    locals()["X" + str(index)] = (
-                        10 ** GF_HR(X, outputGNN, r=qr).cpu().data.numpy()[0, 0]
+            resultslice = np.zeros(X.shape, dtype=np.float32)
+            if not train_params["fast_GF"]:
+                for index in range(X.shape[1]):
+                    input2 = X[:, index : index + 1, :, :]
+                    input1 = F.interpolate(
+                        Y_raw[:, index : index + 1, :, :],
+                        (m, n),
+                        align_corners=True,
+                        mode="bilinear",
                     )
+                    input1, input2 = torch.from_numpy(input1.cpu().data.numpy()).to(
+                        device
+                    ), torch.from_numpy(input2.cpu().data.numpy()).to(device)
+                    resultslice[:, index : index + 1, :, :] = (
+                        10
+                        ** GuidedFilterHRModel(input2, input1, r=train_params["qr"])
+                        .cpu()
+                        .data.numpy()
+                    )
+                if X.shape[1] > 1:
+                    Y = fusion_perslice(
+                        GuidedFilter(r=train_params["fusion_GF_kernel_size"], eps=1),
+                        GuidedFilter(r=9, eps=1e-6),
+                        resultslice[:, :1, :, :],
+                        resultslice[:, 1:, :, :],
+                        train_params["fusion_Gaussian_kernel_size"],
+                        kernel,
+                        boundary,
+                        device=device,
+                    )
+                else:
+                    Y = resultslice[0, 0]
             else:
-                locals()["X" + str(0)] = (
-                    10 ** GF_HR(X, outputGNN, X).cpu().data.numpy()[0, 0]
-                )
-
-            # get all results
-            X_out = {
-                var_name: var_value
-                for var_name, var_value in locals().items()
-                if var_name.startswith("X")
-            }
-            return X_out
+                for index in range(X.shape[1]):
+                    resultslice[:, index : index + 1, :, :] = (
+                        10
+                        ** GuidedFilterHRModel(
+                            Xd[:, index : index + 1, :, :],
+                            Y_raw[:, index : index + 1, :, :],
+                            X[:, index : index + 1, :, :],
+                        )
+                        .cpu()
+                        .data.numpy()[0, 0]
+                    )
+                if X.shape[1] > 1:
+                    Y = fusion_perslice(
+                        GuidedFilter(r=train_params["fusion_GF_kernel_size"], eps=1),
+                        GuidedFilter(r=9, eps=1e-6),
+                        resultslice[:, :1, :, :],
+                        resultslice[:, 1:, :, :],
+                        train_params["fusion_Gaussian_kernel_size"],
+                        kernel,
+                        boundary,
+                        device=device,
+                    )
+                else:
+                    Y = resultslice[0, 0]
+            return (
+                Y,
+                resultslice[0] if sample_params["view_num"] > 1 else None,
+                dualtarget_numpy if sample_params["view_num"] > 1 else None,
+            )
 
     @staticmethod
-    def train_full_arr(
-        img_arr,
-        mask_arr: np.ndarray = None,
-        is_vertical: bool = False,
-        train_param: Dict = None,
-        device: str = "CPU",
-        qr: List[float] = None,
-        require_global_correction: bool = True,
+    def train_on_full_arr(
+        X: Union[np.ndarray, dask.array.core.Array],
+        is_vertical: bool,
+        angle_offset: List,
+        mask: Union[np.ndarray, dask.array.core.Array],
+        train_params: Dict = None,
+        boundary: np.ndarray = None,
+        display: bool = False,
+        device: str = "cpu",
     ):
-        # get image information and prepare local variables
-        dim_z, dim_m, dim_n = img_arr.shape
-        for i in range(len(qr)):
-            locals()["result" + str(i)] = np.zeros((dim_z, dim_m, dim_n))
-        for i in range(len(qr)):
-            locals()["mean" + str(i)] = np.zeros(dim_z)
-
-        md, nd = (
-            dim_m // train_param["resampleRatio"] // 2 * 2 + 1,
-            dim_n // train_param["resampleRatio"] // 2 * 2 + 1,
+        sample_params = {
+            "is_vertical": is_vertical,
+            "angle_offset": angle_offset,
+        }
+        if train_params is None:
+            train_params = destripe_train_params()
+        else:
+            train_params = destripe_train_params(**train_params)
+        setup_seed(0)
+        z, view_num, m, n = X.shape
+        result = np.zeros((z, m, n), dtype=np.uint16)
+        mean = np.zeros(z)
+        sample_params["view_num"] = view_num
+        sample_params["md"], sample_params["nd"] = (
+            m // train_params["resample_ratio"] // 2 * 2 + 1,
+            n // train_params["resample_ratio"] // 2 * 2 + 1,
         )
+        hier_mask_arr, hier_ind_arr, NI_arr = prepare_aux(
+            sample_params["md"],
+            sample_params["nd"],
+            sample_params["is_vertical"],
+            sample_params["angle_offset"],
+            train_params["wedge_degree"],
+            train_params["n_neighbors"],
+        )
+        train_params["NI"] = NI_arr
+        train_params["hier_mask"] = hier_mask_arr
+        train_params["hier_ind"] = hier_ind_arr
+        if sample_params["view_num"] > 1:
+            result_view1, result_view2 = np.zeros((z, m, n), dtype=np.uint16), np.zeros(
+                (z, m, n), dtype=np.uint16
+            )
+            mean_view1, mean_view2 = np.zeros(z), np.zeros(z)
+        if train_params["fast_GF"]:
+            GuidedFilterHRModel = GuidedFilterHR_fast(
+                rx=train_params["GF_kernel_size_inference"],
+                ry=0,
+                angleList=sample_params["angle_offset"],
+                eps=1e-9,
+                device=device,
+            )
+        else:
+            GuidedFilterHRModel = GuidedFilterHR(
+                rX=[
+                    train_params["GF_kernel_size_inference"] * 2 + 1,
+                    train_params["GF_kernel_size_inference"],
+                ],
+                rY=[0, 0],
+                m=(m if sample_params["is_vertical"] else n),
+                n=(n if sample_params["is_vertical"] else m),
+                Angle=sample_params["angle_offset"],
+                device=device,
+            )
+        for i in range(z):
+            Ov = np.log10(np.clip(np.asarray(X[i : i + 1]), 1, None))  # (1, v, m, n)
+            mask_slice = np.asarray(mask[i : i + 1])[None]
+            boundary_slice = (
+                boundary[None, None, i : i + 1, :] if boundary is not None else None
+            )
+            if not sample_params["is_vertical"]:
+                Ov, mask_slice = Ov.transpose(0, 1, 3, 2), mask_slice.transpose(
+                    0, 1, 3, 2
+                )
+            Y, resultslice, dualtarget_numpy = DeStripe.train_on_one_slice(
+                GuidedFilterHRModel,
+                sample_params,
+                train_params,
+                Ov,
+                mask_slice,
+                boundary_slice,
+                i + 1,
+                z,
+                device=device,
+            )
+            if not sample_params["is_vertical"]:
+                Y = Y.T
+                if sample_params["view_num"] > 1:
+                    resultslice = resultslice.transpose(0, 2, 1)
+                    dualtarget_numpy = dualtarget_numpy.T
+            if display:
+                plt.figure(dpi=300)
+                ax = plt.subplot(1, 2, 2)
+                plt.imshow(Y, vmin=10 ** Ov.min(), vmax=10 ** Ov.max(), cmap="gray")
+                ax.set_title("output", fontsize=8, pad=1)
+                plt.axis("off")
+                ax = plt.subplot(1, 2, 1)
+                plt.imshow(
+                    dualtarget_numpy if sample_params["view_num"] > 1 else X[i, 0],
+                    vmin=10 ** Ov.min(),
+                    vmax=10 ** Ov.max(),
+                    cmap="gray",
+                )
+                ax.set_title("input", fontsize=8, pad=1)
+                plt.axis("off")
+                plt.show()
+            result[i] = np.clip(Y, 0, 65535).astype(np.uint16)
+            mean[i] = np.mean(result[i] + 0.1)
+            if sample_params["view_num"] > 1:
+                result_view1[i] = np.clip(resultslice[:1, :, :], 0, 65535).astype(
+                    np.uint16
+                )
+                result_view2[i] = np.clip(resultslice[1:, :, :], 0, 65535).astype(
+                    np.uint16
+                )
+                mean_view1[i] = np.mean(result_view1[i] + 0.1)
+                mean_view2[i] = np.mean(result_view2[i] + 0.1)
+        if train_params["require_global_correction"] and (z != 1):
+            print("global correcting...")
+            result = global_correction(mean, result)
+            if sample_params["view_num"] > 1:
+                result_view1, result_view2 = global_correction(
+                    mean_view1, result_view1
+                ), global_correction(mean_view2, result_view2)
+        print("Done")
+        if sample_params["view_num"] == 2:
+            return result, result_view1, result_view2
+        else:
+            return result
 
-        shape_param = {"md": md, "nd": nd}
-
-        # prepare auxillary variables
-        NI_arr, hier_mask_arr, hier_ind_arr = prepare_aux(
-            md,
-            nd,
+    def train(
+        self,
+        X1: Union[str, np.ndarray, dask.array.core.Array],
+        is_vertical: bool,
+        angle_offset: List,
+        X2: Union[str, np.ndarray, dask.array.core.Array] = None,
+        mask: Union[str, np.ndarray, dask.array.core.Array] = None,
+        boundary: Union[str, np.ndarray] = None,
+        display: bool = False,
+    ):
+        # read in X
+        X1_handle = AICSImage(X1)
+        X1_data = X1_handle.get_image_dask_data("ZYX", T=0, C=0)
+        if X2 is not None:
+            X2_handle = AICSImage(X2)
+            X2_data = X2_handle.get_image_dask_data("ZYX", T=0, C=0)
+        X = (
+            da.stack([X1_data, X2_data], 1)
+            if X2 is not None
+            else da.stack([X1_data], 1)
+        )
+        view_num = X.shape[1]
+        z, _, m, n = X.shape
+        # read in mask
+        if mask is None:
+            mask_data = np.zeros((z, m, n), dtype=bool)
+        else:
+            mask_handle = AICSImage(mask)
+            mask_data = mask_handle.get_image_dask_data("ZYX", T=0, C=0)
+            assert mask_data.shape == (z, m, n), print(
+                "mask should be of same shape as input volume(s)."
+            )
+        # read in dual-result, if applicable
+        if view_num > 1:
+            assert not isinstance(boundary, type(None)), print(
+                "dual-view fusion boundary is missing."
+            )
+            if isinstance(boundary, str):
+                boundary = np.load(boundary)
+            assert boundary.shape == (z, n) if is_vertical else (z, m), print(
+                "boundary index should be of shape [z_slices, n columns]."
+            )
+        # training
+        out = self.train_on_full_arr(
+            X,
             is_vertical,
-            train_param["angleOffset"],
-            train_param["deg"],
-            train_param["Nneighbors"],
+            angle_offset,
+            mask_data,
+            self.train_params,
+            boundary,
+            display=display,
+            device=self.device,
         )
-
-        NI, hier_mask, hier_ind = (
-            torch.from_numpy(NI_arr).to(device),
-            torch.from_numpy(hier_mask_arr).to(device),
-            torch.from_numpy(hier_ind_arr).to(device),
-        )
-
-        train_param["NI"] = NI
-        train_param["hier_mask"] = hier_mask
-        train_param["hier_mask"] = hier_mask
-
-        # loop through all Z
-        for idx_z in range(dim_z):
-            print(f"processing {idx_z} / {dim_z} slice .")
-            arr_O = img_arr[idx_z, :, :]
-            if mask_arr is None:
-                arr_map = np.zeros(arr_O.shape)
-            else:
-                arr_map = mask_arr[idx_z, :, :]
-            all_X = DeStripe.train_one_slice(
-                arr_O,
-                arr_map,
-                is_vertical,
-                device,
-                shape_param,
-                train_param,
-            )
-            for var_name, var_value in all_X.items():
-                exec(f"{var_name} = {repr(var_value)}")
-
-            # rotate if it is vertical
-            if not is_vertical:
-                for index in range(len(qr)):
-                    locals()["X" + str(index)] = locals()["X" + str(index)].T
-            for index in range(len(qr)):
-                locals()["result" + str(index)][i] = locals()["X" + str(index)]
-                locals()["mean" + str(index)][i] = np.mean(locals()["X" + str(index)])
-
-        # glocal correction for the whole z-stack
-        if require_global_correction and dim_z != 1:
-            print("global correcting...")
-            for i in range(len(qr)):
-                locals()["means" + str(i)] = scipy.signal.savgol_filter(
-                    locals()["mean" + str(i)],
-                    min(21, len(locals()["mean" + str(i)])),
-                    1,
-                )
-                locals()["result" + str(i)][:] = (
-                    locals()["result" + str(i)]
-                    - locals()["mean" + str(i)][:, None, None]
-                    + locals()["means" + str(i)][:, None, None]
-                )
-
-        # gather the final result into a z-stack
-        out_list = []
-        for i in range(len(qr)):
-            locals()["result" + str(i)] = np.clip(
-                locals()["result" + str(i)], 0, 65535
-            ).astype(np.uint16)
-            out_list.append(locals()["result" + str(i)])
-
-        return np.stack(out_list, axis=0)
-
-    def train(self):
-        # get image information and prepare local variables
-        img_handle = AICSImage(self.filename)
-        dim_z = img_handle.dims.Z
-        dim_m = img_handle.dims.Y
-        dim_n = img_handle.dims.X
-        for i in range(len(self.qr)):
-            locals()["result" + str(i)] = np.zeros((dim_z, dim_m, dim_n))
-        for i in range(len(self.qr)):
-            locals()["mean" + str(i)] = np.zeros(dim_z)
-
-        if self.mask_name is None:
-            mask_handle = AICSImage(self.mask_name)
-
-        md, nd = (
-            dim_m // self.train_param["resampleRatio"] // 2 * 2 + 1,
-            dim_n // self.train_param["resampleRatio"] // 2 * 2 + 1,
-        )
-
-        shape_param = {"md": md, "nd": nd}
-
-        # prepare auxilluary variables
-        NI_arr, hier_mask_arr, hier_ind_arr = prepare_aux(
-            md,
-            nd,
-            self.is_vertical,
-            self.train_param["angleOffset"],
-            self.train_param["deg"],
-            self.train_param["Nneighbors"],
-        )
-
-        NI, hier_mask, hier_ind = (
-            torch.from_numpy(NI_arr).to(self.device),
-            torch.from_numpy(hier_mask_arr).to(self.device),
-            torch.from_numpy(hier_ind_arr).to(self.device),
-        )
-
-        self.train_param["NI"] = NI
-        self.train_param["hier_mask"] = hier_mask
-        self.train_param["hier_mask"] = hier_mask
-
-        # loop through all Z
-        for idx_z in range(dim_z):
-            print(f"processing {idx_z} / {dim_z} slice .")
-            arr_O = img_handle.get_dask_image_data("YX", Z=idx_z, T=0, C=0).compute()
-            if self.mask_name is None:
-                arr_map = np.zeros(arr_O.shape)
-            else:
-                arr_map = mask_handle.get_dask_image_data(
-                    "YX", Z=idx_z, T=0, C=0
-                ).compute()
-            all_X = self.train_one_slice(
-                arr_O,
-                arr_map,
-                self._isVertical,
-                self.device,
-                self.shape_param,
-                self.train_param,
-            )
-            for var_name, var_value in all_X.items():
-                exec(f"{var_name} = {repr(var_value)}")
-
-            # rotate if it is vertical
-            if not self._isVertical:
-                for index in range(len(self.qr)):
-                    locals()["X" + str(index)] = locals()["X" + str(index)].T
-            for index in range(len(self.qr)):
-                locals()["result" + str(index)][i] = locals()["X" + str(index)]
-                locals()["mean" + str(index)][i] = np.mean(locals()["X" + str(index)])
-
-        # glocal correction for the whole z-stack
-        if self.require_global_correction and dim_z != 1:
-            print("global correcting...")
-            for i in range(len(self.qr)):
-                locals()["means" + str(i)] = scipy.signal.savgol_filter(
-                    locals()["mean" + str(i)],
-                    min(21, len(locals()["mean" + str(i)])),
-                    1,
-                )
-                locals()["result" + str(i)][:] = (
-                    locals()["result" + str(i)]
-                    - locals()["mean" + str(i)][:, None, None]
-                    + locals()["means" + str(i)][:, None, None]
-                )
-
-        # gather the final result into a z-stack
-        out_list = []
-        for i in range(len(self.qr)):
-            locals()["result" + str(i)] = np.clip(
-                locals()["result" + str(i)], 0, 65535
-            ).astype(np.uint16)
-            out_list.append(locals()["result" + str(i)])
-
-        return np.stack(out_list, axis=0)
+        return out

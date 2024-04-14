@@ -2,6 +2,55 @@ from typing import List
 import numpy as np
 from scipy.ndimage import rotate
 import math
+import scipy
+import torch
+from torch.nn import functional as F
+
+
+def fusion_perslice(
+    GFbase, GFdetail, topSlice, bottomSlice, Gaussianr, kernel, boundary, device
+):
+    topSlice = torch.from_numpy(topSlice).to(device)
+    bottomSlice = torch.from_numpy(bottomSlice).to(device)
+    topBase = torch.conv2d(
+        F.pad(
+            topSlice,
+            (Gaussianr // 2, Gaussianr // 2, Gaussianr // 2, Gaussianr // 2),
+            "reflect",
+        ),
+        kernel,
+    )
+    bottomBase = torch.conv2d(
+        F.pad(
+            bottomSlice,
+            (Gaussianr // 2, Gaussianr // 2, Gaussianr // 2, Gaussianr // 2),
+            "reflect",
+        ),
+        kernel,
+    )
+    topDetail, bottomDetail = topSlice - topBase, bottomSlice - bottomBase
+    mask = torch.arange(topSlice.shape[2], device=device)[None, None, :, None]
+    mask0, mask1 = (mask > boundary).to(torch.float), (mask <= boundary).to(torch.float)
+    result0base, result1base = GFbase(bottomBase, mask0), GFbase(topBase, mask1)
+    result0detail, result1detail = GFdetail(bottomDetail, mask0), GFdetail(
+        topDetail, mask1
+    )
+    t = result0base + result1base + 1e-3
+    result0base, result1base = result0base / t, result1base / t
+    t = result0detail + result1detail + 1e-3
+    result0detail, result1detail = result0detail / t, result1detail / t
+    minn, maxx = min(topSlice.min(), bottomSlice.min()), max(
+        topSlice.max(), bottomSlice.max()
+    )
+    result = torch.clip(
+        result0base * bottomBase
+        + result1base * topBase
+        + result0detail * bottomDetail
+        + result1detail * topDetail,
+        minn,
+        maxx,
+    )
+    return result.squeeze().cpu().data.numpy().astype(np.uint16)
 
 
 def NeighborSampling(m, n, k_neighbor=16):
@@ -65,7 +114,9 @@ def WedgeMask(md, nd, Angle, deg):
     if Angle != 0:
         tmp = rotate(tmp, Angle, reshape=False)
     b = tmp[md - md // 2 : md + md // 2 + 1, nd - nd // 2 : nd + nd // 2 + 1]
-    return ((a <= math.pi / 180 * (90 - deg)) * (b > 18)) != 0
+    return (
+        (a <= math.pi / 180 * (90 - deg)).astype(np.int32) * (b > 18).astype(np.int32)
+    ) != 0
 
 
 def prepare_aux(
@@ -103,18 +154,10 @@ def prepare_aux(
     hier_ind: ndarray
         TODO
     """
-
+    if not is_vertical:
+        (nd, md) = (md, nd)
     angleMask = np.stack(
-        [
-            WedgeMask(
-                md if is_vertical else nd,
-                nd if is_vertical else md,
-                Angle=angle,
-                deg=deg,
-            )
-            for angle in angleOffset
-        ],
-        0,
+        [WedgeMask(md, nd, Angle=angle, deg=deg) for angle in angleOffset], 0
     )
     angleMask = angleMask.reshape(angleMask.shape[0], -1)[:, : md * nd // 2]
     hier_mask = np.where(angleMask == 1)[1]
@@ -123,13 +166,41 @@ def prepare_aux(
             [np.where(angleMask.reshape(-1) == index)[0] for index in range(2)]
         )
     )
-    if is_vertical:
-        NI = NeighborSampling(md, nd, k_neighbor=Nneighbors)
-    else:
-        NI = NeighborSampling(nd, md, k_neighbor=Nneighbors)
-
+    NI = NeighborSampling(md, nd, k_neighbor=Nneighbors)
     NI = np.concatenate(
         [NI[hier_mask == 0, 1 : Nneighbors + 1].T for hier_mask in angleMask], 1
     )
+    return hier_mask, hier_ind, NI
 
-    return NI, hier_mask, hier_ind
+
+def global_correction(mean, result):
+    means = scipy.signal.savgol_filter(mean, min(21, len(mean)), 1)
+    MIN, MAX = result.min(), result.max()
+    result = result - mean[:, None, None] + means[:, None, None]
+    result = (result - result.min()) / (result.max() - result.min()) * (MAX - MIN) + MIN
+    return np.clip(result, 0, 65535).astype(np.uint16)
+
+
+def destripe_train_params(
+    loss_eps: float = 10,
+    qr: float = 0.5,
+    resample_ratio: int = 3,
+    GF_kernel_size_train: int = 29,
+    GF_kernel_size_inference: int = 29,
+    hessian_kernel_sigma: float = 0.5,
+    sampling_in_MSEloss: int = 2,
+    isotropic_hessian: bool = True,
+    lambda_tv: float = 1,
+    lambda_hessian: float = 1,
+    inc: int = 16,
+    n_epochs: int = 300,
+    wedge_degree: float = 29,
+    n_neighbors: int = 16,
+    fast_GF: bool = False,
+    fusion_GF_kernel_size: int = 49,
+    fusion_Gaussian_kernel_size: int = 49,
+    angle_offset: list = [0],
+    require_global_correction: bool = True,
+):
+    kwargs = locals()
+    return kwargs
