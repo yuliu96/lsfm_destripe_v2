@@ -6,8 +6,6 @@
 
 A PyTorch implementation of LSFM DeStripe method
 
-(add a short description, to be updated by Yu)
-
 ---
 
 ## Quick Start
