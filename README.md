@@ -133,9 +133,6 @@ usage: run_destripe --X1_path
 **Stable Release:** `pip install lsfm_destripe`<br>
 **Development Head:** `pip install git+https://github.com/peng-lab/lsfm_destripe.git`
 
-## Documentation
-
-For full package documentation please visit [peng-lab.github.io/lsfm_destripe](https://peng-lab.github.io/lsfm_destripe).
 
 ## Development
 
