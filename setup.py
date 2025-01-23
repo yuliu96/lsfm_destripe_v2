@@ -38,12 +38,18 @@ dev_requirements = [
 ]
 
 requirements = [
+    "jax[cuda]",
     "scikit-image",
     "torch",
     "torchvision",
     "aicsimageio",
     "tqdm",
     "matplotlib",
+    "dm-haiku",
+    "SimpleITK",
+    "jaxwt",
+    "ptwt",
+    "PyWavelets",
 ]
 
 extra_requirements = {
@@ -57,8 +63,8 @@ extra_requirements = {
 }
 
 setup(
-    author="Jianxu Chen",
-    author_email="jianxu.chen@isas.de",
+    author="Yu Liu",
+    author_email="liuyu9671@gmail.com",
     classifiers=[
         "Development Status :: 2 - Pre-Alpha",
         "Intended Audience :: Developers",
@@ -68,11 +74,12 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
     ],
-    description="A PyTorch implementation of LSFM DeStripe method",
+    description="DeStripe module in Leonardo toolset for LSFM destriping",
     entry_points={
         "console_scripts": ["destripe=lsfm_destripe.bin.run_destripe:main"],
     },
     install_requires=requirements,
+    extras_require=extra_requirements,
     license="MIT license",
     long_description=readme,
     long_description_content_type="text/markdown",
@@ -84,7 +91,6 @@ setup(
     setup_requires=setup_requirements,
     test_suite="lsfm_destripe/tests",
     tests_require=test_requirements,
-    extras_require=extra_requirements,
     url="https://github.com/peng-lab/lsfm_destripe",
     # Do not edit this string manually, always use bumpversion
     # Details in CONTRIBUTING.rst
