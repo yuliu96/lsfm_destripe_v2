@@ -94,6 +94,6 @@ setup(
     url="https://github.com/peng-lab/lsfm_destripe",
     # Do not edit this string manually, always use bumpversion
     # Details in CONTRIBUTING.rst
-    version="0.1.0",
+    version="0.2.0",
     zip_safe=False,
 )
