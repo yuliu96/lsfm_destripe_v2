@@ -50,7 +50,6 @@ requirements = [
     "jaxwt",
     "ptwt",
     "PyWavelets",
-    "numpy==1.26.4",
 ]
 
 extra_requirements = {
